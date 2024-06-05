@@ -2,6 +2,7 @@ import os
 import json
 import random
 import torch
+import pickle
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ def load_datasets():
     truthfulness_train_data, truthfulness_mc_test_data, truthfulness_oe_test_data = create_dataset(
         "datasets/truthfulness/train_truthfulness_dataset.json",
         "datasets/truthfulness/mc_test_truthfulness_dataset.json",
-        "datasets/truthfulness/mc_test_truthfulness_dataset.json"
+        "datasets/truthfulness/oe_test_truthfulness_dataset.json"
     )
 
     return {
@@ -86,7 +87,7 @@ class TextProbs:
     def __repr__(self) -> str:
         return f"TextProbs({self.text}:{self.sum_logprobs:.2f})"
 
-def get_text_probs(input: str, model: Model, tokenizer: Tokenizer) -> TextProbs:
+def get_text_probs(input: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer) -> TextProbs:
     """ Get the token-wise probabilities of a given input """
     inputs = tokenizer(input, return_tensors="pt")
     outputs = model(**inputs, output_hidden_states=False, return_dict=True)
@@ -133,9 +134,26 @@ def make_prompts(question, answer, behavior):
     user_prompt = f"{SCORING_PROMPTS[behavior]}\n\nQuestion:\n{question}\n\nAnswer:\n{answer}"
     return system_prompt, user_prompt
 
+def load_steering_vectors(layers, base_path="../steering_vectors"):
+    sycophancy_vectors = {}
+    corrigibility_vectors = {}
+    truthfulness_vectors = {}
+
+    for layer in layers:
+        with open(f"{base_path}/sycophancy_steering_vector_{layer}.pkl", "rb") as f:
+            sycophancy_vectors[layer] = pickle.load(f)
+
+        with open(f"{base_path}/corrigibility_steering_vector_{layer}.pkl", "rb") as f:
+            corrigibility_vectors[layer] = pickle.load(f)
+
+        with open(f"{base_path}/truthfulness_steering_vector_{layer}.pkl", "rb") as f:
+            truthfulness_vectors[layer] = pickle.load(f)
+
+    return sycophancy_vectors, corrigibility_vectors, truthfulness_vectors
+
 def evaluate_open_ended(
-    model: Model, 
-    tokenizer: Tokenizer, 
+    model: AutoModelForCausalLM, 
+    tokenizer: AutoTokenizer, 
     data: List[dict],
     behavior: str,
     show_progress: bool = False
@@ -154,6 +172,11 @@ def evaluate_open_ended(
         })
     return results
 
+def generate_text(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer) -> str:
+    inputs = tokenizer(prompt, return_tensors="pt")
+    outputs = model.generate(**inputs, max_length=50, num_return_sequences=1, do_sample=True)
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
 def main():
     HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN")
 
@@ -165,10 +188,22 @@ def main():
 
     final_results = {}
 
-    for behavior, data in all_data.items():
-        print(f"Evaluating {behavior}...")
-        behavior_results = evaluate_open_ended(model, tokenizer, data, behavior, show_progress=True)
-        final_results[behavior] = behavior_results
+    sycophancy_vectors, corrigibility_vectors, truthfulness_vectors = load_steering_vectors([13, 14, 15])
+
+    # [corr_layer, syco_layer, truth_layer]
+    order = [13, 14, 15]
+
+    # [corr_mult, syco_mult, truth_mult]
+    multiples = [1, 1, 1]
+
+    with corrigibility_vectors[order[0]].apply(model, multiplier=multiples[0], min_token_index=0):
+        with sycophancy_vectors[order[1]].apply(model, multiplier=multiples[1], min_token_index=0):
+            with truthfulness_vectors[order[2]].apply(model, multiplier=multiples[2], min_token_index=0):
+                for behavior, data in all_data.items():
+                    print(f"Evaluating {behavior}...")
+                    
+                    behavior_results = evaluate_open_ended(model, tokenizer, data, behavior, show_progress=True)
+                    final_results[behavior] = behavior_results
 
     # Save the results to a JSON file
     with open("open_ended_scored_results.json", "w") as outfile:
