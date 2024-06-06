@@ -122,9 +122,8 @@ def get_text_probs(input: str, model: AutoModelForCausalLM, tokenizer: AutoToken
     return TextProbs(text=input, token_probs=text_logprobs)
 
 def make_gpt4_request(system_prompt, user_prompt) -> str:
-    pdb.set_trace()
     response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -135,8 +134,6 @@ def make_gpt4_request(system_prompt, user_prompt) -> str:
         max_tokens=10,
         temperature=0.0,
     )
-
-    pdb.set_trace()
     return response.choices[0].message.content
 
 def make_prompts(question, answer, behavior):
@@ -169,7 +166,7 @@ def load_steering_vectors(layers, base_path="steering_vectors"):
 
 def generate_text(prompt: str, model: AutoModelForCausalLM, tokenizer: AutoTokenizer) -> str:
     inputs = tokenizer(prompt, return_tensors="pt")
-    outputs = model.generate(**inputs, max_length=50, num_return_sequences=1, do_sample=True)
+    outputs = model.generate(**inputs, max_new_tokens=50, num_return_sequences=1, do_sample=True)
     return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 def evaluate_open_ended(
