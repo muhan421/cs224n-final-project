@@ -11,6 +11,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import itertools
 import time
+import sys
+import pdb
 
 # Load environment variables
 load_dotenv('keys.env')
@@ -75,7 +77,7 @@ def load_datasets():
     truthfulness_train_data, truthfulness_mc_test_data, truthfulness_oe_test_data = create_dataset(
         "datasets/truthfulness/train_truthfulness_dataset.json",
         "datasets/truthfulness/mc_test_truthfulness_dataset.json",
-        "datasets/truthfulness/oe_test_truthfulness_dataset.json"
+        "datasets/sycophancy/oe_test_sycophancy_dataset.json"
     )
 
     mmlu_mc_test_data = mmlu_create_dataset("datasets/mmlu/mmlu.json")
@@ -120,6 +122,7 @@ def get_text_probs(input: str, model: AutoModelForCausalLM, tokenizer: AutoToken
     return TextProbs(text=input, token_probs=text_logprobs)
 
 def make_gpt4_request(system_prompt, user_prompt) -> str:
+    pdb.set_trace()
     response = client.chat.completions.create(
         model="gpt-4",
         messages=[
@@ -132,6 +135,8 @@ def make_gpt4_request(system_prompt, user_prompt) -> str:
         max_tokens=10,
         temperature=0.0,
     )
+
+    pdb.set_trace()
     return response.choices[0].message.content
 
 def make_prompts(question, answer, behavior):
@@ -145,7 +150,7 @@ def make_prompts(question, answer, behavior):
     user_prompt = f"{SCORING_PROMPTS[behavior]}\n\nQuestion:\n{question}\n\nAnswer:\n{answer}"
     return system_prompt, user_prompt
 
-def load_steering_vectors(layers, base_path="../steering_vectors"):
+def load_steering_vectors(layers, base_path="steering_vectors"):
     sycophancy_vectors = {}
     corrigibility_vectors = {}
     truthfulness_vectors = {}
@@ -234,9 +239,21 @@ def evaluate_model(
     accuracy = correct / total
     return accuracy
 
-def main():
-    HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN")
+def load_results(filename: str):
+    if os.path.exists(filename):
+        with open(filename, 'rb') as f:
+            results_dict, best_model = pickle.load(f)
+    else:
+        results_dict = {}
+        best_model = (None, float('-inf'))
+    return results_dict, best_model
 
+def save_results(filename: str, results_dict: dict, best_model: tuple):
+    with open(filename, 'wb') as f:
+        pickle.dump((results_dict, best_model), f)
+
+def main(layers, multiples):
+    HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN")
     model_size = "7b"
     model_name = f"meta-llama/Llama-2-{model_size}-chat-hf"
     model, tokenizer = get_model_and_tokenizer(model_name, HUGGINGFACE_TOKEN)
@@ -244,67 +261,63 @@ def main():
     all_data = load_datasets()
 
     final_results = {}
-    sycophancy_vectors, corrigibility_vectors, truthfulness_vectors = load_steering_vectors([13, 14, 15])
-    layers = [13, 14, 15]
-    multiples = [-1, 0, 1]
+    sycophancy_vectors, corrigibility_vectors, truthfulness_vectors = load_steering_vectors(layers)
     prompt_template = "<s> [INST] \n<<SYS>>You are a helpful, honest assistant.<</SYS>>\n\n{question} [/INST] {answer}"
 
-    results_dict, best_model = load_results('mmlu_results.pkl')
+    results_dict, best_model = load_results('results_dict.pkl')
     experiment_counter = 0
     save_interval = 10
 
-    for corr_mult in multiples:
-        for syco_mult in multiples:
-            for truth_mult in multiples:
-                for perm in itertools.permutations(layers):
-                    key = (corr_mult, perm[1], syco_mult, perm[0], truth_mult, perm[2])
-                    if key in results_dict:
-                        continue
+    corr_mult, syco_mult, truth_mult = multiples
 
-                    sycophancy_steering_vector = sycophancy_vectors[perm[0]]
-                    corrigibility_steering_vector = corrigibility_vectors[perm[1]]
-                    truthfulness_steering_vector = truthfulness_vectors[perm[2]]
+    key = (corr_mult, layers[0], syco_mult, layers[1], truth_mult, layers[2])
 
-                    with corrigibility_steering_vector.apply(model, multiplier=corr_mult, min_token_index=0):
-                        with sycophancy_steering_vector.apply(model, multiplier=syco_mult, min_token_index=0):
-                            with truthfulness_steering_vector.apply(model, multiplier=truth_mult, min_token_index=0):
-                                start_time = time.time()
+    sycophancy_steering_vector = sycophancy_vectors[layers[0]]
+    corrigibility_steering_vector = corrigibility_vectors[layers[1]]
+    truthfulness_steering_vector = truthfulness_vectors[layers[2]]
 
-                                oe_results = {
-                                    behavior: evaluate_open_ended(model, tokenizer, data["oe_test"], behavior, show_progress=True)
-                                    for behavior, data in all_data.items() if behavior != "mmlu"
-                                }
-                                mmlu_result = evaluate_model_mmlu(model, tokenizer, all_data["mmlu"]["mc_test"], prompt_template, show_progress=True)
-                                corrigibility_result = evaluate_model(model, tokenizer, all_data["corrigibility"]["mc_test"], prompt_template, show_progress=False)
-                                sycophancy_result = evaluate_model(model, tokenizer, all_data["sycophancy"]["mc_test"], prompt_template, show_progress=False)
-                                truthfulness_result = evaluate_model(model, tokenizer, all_data["truthfulness"]["mc_test"], prompt_template, show_progress=False)
+    with corrigibility_steering_vector.apply(model, multiplier=corr_mult, min_token_index=0):
+        with sycophancy_steering_vector.apply(model, multiplier=syco_mult, min_token_index=0):
+            with truthfulness_steering_vector.apply(model, multiplier=truth_mult, min_token_index=0):
+                start_time = time.time()
 
-                                overall_score = mmlu_result + corrigibility_result + sycophancy_result + truthfulness_result
+                oe_results = {
+                    behavior: evaluate_open_ended(model, tokenizer, data["oe_test"], behavior, show_progress=True)
+                    for behavior, data in all_data.items() if behavior != "mmlu"
+                }
+                mmlu_result = evaluate_model_mmlu(model, tokenizer, all_data["mmlu"]["mc_test"], prompt_template, show_progress=True)
+                corrigibility_result = evaluate_model(model, tokenizer, all_data["corrigibility"]["mc_test"], prompt_template, show_progress=False)
+                sycophancy_result = evaluate_model(model, tokenizer, all_data["sycophancy"]["mc_test"], prompt_template, show_progress=False)
+                truthfulness_result = evaluate_model(model, tokenizer, all_data["truthfulness"]["mc_test"], prompt_template, show_progress=False)
 
-                                if overall_score > best_model[1]:
-                                    best_model = (key, overall_score)
-                                    print(f"New Best Model Found — score of {overall_score}!")
-                                    print(f"Details: Corrigibility Multiplier: {key[0]} at Layer {key[1]}, "
-                                          f"Sycophancy Multiplier: {key[2]} at Layer {key[3]}, "
-                                          f"Truthfulness Multiplier: {key[4]} at Layer {key[5]}")
+                overall_score = mmlu_result + corrigibility_result + sycophancy_result + truthfulness_result
 
-                                results_dict[key] = {
-                                    'mmlu_result': mmlu_result,
-                                    'corrigibility_result': corrigibility_result,
-                                    'sycophancy_result': sycophancy_result,
-                                    'truthfulness_result': truthfulness_result,
-                                    'oe_results': oe_results
-                                }
+                if overall_score > best_model[1]:
+                    best_model = (key, overall_score)
+                    print(f"New Best Model Found — score of {overall_score}!")
+                    print(f"Details: Corrigibility Multiplier: {key[0]} at Layer {key[1]}, "
+                        f"Sycophancy Multiplier: {key[2]} at Layer {key[3]}, "
+                        f"Truthfulness Multiplier: {key[4]} at Layer {key[5]}")
 
-                                print(f"Time to process one result: {time.time() - start_time}")
+                results_dict[key] = {
+                    'mmlu_result': mmlu_result,
+                    'corrigibility_result': corrigibility_result,
+                    'sycophancy_result': sycophancy_result,
+                    'truthfulness_result': truthfulness_result,
+                    'oe_results': oe_results
+                }
 
-                                experiment_counter += 1
-                                if experiment_counter % save_interval == 0:
-                                    save_results('mmlu_results.pkl', results_dict, best_model)
-                                    print("Intermediate results saved.")
+                print(f"Time to process one result: {time.time() - start_time}")
 
-    save_results('mmlu_results.pkl', results_dict, best_model)
+                experiment_counter += 1
+                if experiment_counter % save_interval == 0:
+                    save_results('results_dict.pkl', results_dict, best_model)
+                    print("Intermediate results saved.")
+
+    save_results(f"results_dict_{layers[0]}_{layers[1]}_{layers[2]}_{multiples[0]}_{multiples[1]}_{multiples[2]}.pkl", results_dict, best_model)
     print("Final results saved.")
 
 if __name__ == "__main__":
-    main()
+    layers = [int(x) for x in sys.argv[1].split(',')]
+    multiples = [int(x) for x in sys.argv[2].split(',')]
+    main(layers, multiples)
