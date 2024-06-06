@@ -187,7 +187,7 @@ def evaluate_open_ended(
         })
     return results
 
-def make_pos_neg_pair(mwe_data: Dict[str, str], prompt_template: str) -> Tuple[str, str]:
+def make_pos_neg_pair(mwe_data: Dict[str, str], prompt_template: str):
     pos = prompt_template.format(
         question=mwe_data['question'],
         answer=mwe_data['answer_matching_behavior']
